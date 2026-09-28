@@ -1,0 +1,6 @@
+{
+  "name": "nomatic RSS – Ultra Reader & Media Hub",
+  "description": "Next-generation RSS & Atom reader with offline caching, immersive swipe-up feed deck, in-app video & podcast player, customizable themes, tag manager, and AI feed analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
