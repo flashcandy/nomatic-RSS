@@ -191,13 +191,21 @@ export const ArticleDetailModal: React.FC<ArticleDetailModalProps> = ({
           content: contentToAnalyze,
           mode,
           apiKey: openRouterConfig.apiKey,
-          model: openRouterConfig.model || 'google/gemini-2.0-flash-exp:free',
+          provider: openRouterConfig.provider,
+          model: openRouterConfig.model || 'gemini-2.5-flash',
           targetLang: selectedLang,
         }),
       });
 
-      const data = await res.json();
-      if (res.ok && data.success) {
+      const rawText = await res.text();
+      let data: any = null;
+      if (rawText.trim().startsWith('{')) {
+        try {
+          data = JSON.parse(rawText);
+        } catch (e) {}
+      }
+
+      if (res.ok && data && data.success) {
         if (mode === 'summary' || mode === 'eli5') {
           setAiResult((prev) => ({
             ...prev,
@@ -218,7 +226,27 @@ export const ArticleDetailModal: React.FC<ArticleDetailModalProps> = ({
           }));
         }
       } else {
-        setAiError(data.error || 'Failed to complete AI feed analysis. Please check your API key.');
+      let finalError = 'Failed to complete AI feed analysis. Please check your AI settings.';
+      if (data?.error) {
+        finalError = typeof data.error === 'string' ? data.error : JSON.stringify(data.error);
+      } else if (rawText) {
+        try {
+          const parsed = JSON.parse(rawText);
+          if (parsed?.error?.message) {
+            finalError = parsed.error.message;
+          } else if (parsed?.error) {
+            finalError = typeof parsed.error === 'string' ? parsed.error : JSON.stringify(parsed.error);
+          }
+        } catch (e) {
+          if (!rawText.startsWith('<')) finalError = rawText;
+        }
+      }
+
+      if (finalError.includes('429') || finalError.includes('RESOURCE_EXHAUSTED') || finalError.includes('quota') || finalError.includes('Quota')) {
+        finalError = 'Gemini Quota limit exceeded for this model (Requires Paid Billing). Switch to "Google Gemini 2.5 Flash" in AI Settings (100% Free Tier).';
+      }
+
+      setAiError(finalError);
       }
     } catch (e: any) {
       console.error('AI fetch error:', e);

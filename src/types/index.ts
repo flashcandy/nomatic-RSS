@@ -101,8 +101,12 @@ export interface NotificationSettings {
   unreadBadge: boolean;
 }
 
+export type AIProvider = 'google' | 'openrouter';
+
 export interface OpenRouterConfig {
-  apiKey: string;
+  provider?: AIProvider;
+  apiKey: string; // Active key or OpenRouter key
+  googleApiKey?: string; // Optional dedicated Google API key
   model: string;
   customInstructions?: string;
 }

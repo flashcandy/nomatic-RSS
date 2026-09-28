@@ -32,8 +32,9 @@ export const DEFAULT_NOTIF_SETTINGS: NotificationSettings = {
 };
 
 export const DEFAULT_OPENROUTER_CONFIG: OpenRouterConfig = {
+  provider: 'google',
   apiKey: '',
-  model: 'google/gemini-2.0-flash-exp:free',
+  model: 'gemini-2.5-flash',
   customInstructions: '',
 };
 

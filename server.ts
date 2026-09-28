@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as cheerio from 'cheerio';
+import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
@@ -200,46 +201,108 @@ function extractErrorMessage(status: number, errText: string): string {
   }
 
   if (status === 401) return 'Invalid OpenRouter API Key. Please verify your key at openrouter.ai/keys';
-  if (status === 402) return 'Insufficient OpenRouter credits or rate limit exceeded for this model.';
+  if (status === 402) return 'Insufficient OpenRouter credits. Please select a free tier model (e.g. Gemini 2.0 Flash or DeepSeek R1).';
   if (status === 404) return 'The requested AI model was not found or is currently unavailable on OpenRouter.';
-  if (status === 429) return 'Rate limit exceeded on OpenRouter. If using a free model, try switching to Gemini 2.0 Flash or DeepSeek.';
+  if (status === 429) return 'Rate limit exceeded on OpenRouter. Try switching to Gemini 2.0 Flash (Free) or Llama 3.2 3B.';
   return errText || `OpenRouter returned status code ${status}`;
 }
 
 const FREE_FALLBACK_MODELS = [
   'google/gemini-2.0-flash-exp:free',
-  'meta-llama/llama-3.3-70b-instruct:free',
   'deepseek/deepseek-r1:free',
   'mistralai/mistral-7b-instruct:free',
   'qwen/qwen-2.5-72b-instruct:free',
-  'meta-llama/llama-3.2-3b-instruct:free'
+  'meta-llama/llama-3.2-3b-instruct',
+  'meta-llama/llama-3.3-70b-instruct',
+  'meta-llama/llama-3.3-70b-instruct:free',
 ];
 
-// OpenRouter Test & Verification Endpoint
-app.post('/api/ai/test', async (req, res) => {
-  const apiKey = normalizeKey(req.body.apiKey || process.env.OPENROUTER_API_KEY);
-  const model = req.body.model || 'google/gemini-2.0-flash-exp:free';
+// Provider detection helper
+function detectProvider(apiKey: string, explicitProvider?: string, model?: string): 'google' | 'openrouter' {
+  if (explicitProvider === 'google' || explicitProvider === 'openrouter') {
+    return explicitProvider;
+  }
+  if (apiKey.startsWith('AIza') || apiKey.startsWith('aiza')) {
+    return 'google';
+  }
+  if (apiKey.startsWith('sk-or-') || apiKey.startsWith('sk-')) {
+    return 'openrouter';
+  }
+  if (model && (model.startsWith('gemini-') && !model.includes('/'))) {
+    return 'google';
+  }
+  return 'openrouter';
+}
 
-  if (!apiKey) {
+// Unified AI Test & Verification Endpoint (Google Gemini + OpenRouter)
+app.post('/api/ai/test', async (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  const rawKey = req.body.apiKey;
+  const requestedProvider = req.body.provider;
+  const requestedModel = req.body.model;
+
+  const keyToUse = normalizeKey(rawKey || (requestedProvider === 'google' ? process.env.GEMINI_API_KEY : process.env.OPENROUTER_API_KEY));
+  const provider = detectProvider(keyToUse, requestedProvider, requestedModel);
+  const startTime = Date.now();
+
+  if (!keyToUse) {
     return res.status(400).json({
       success: false,
-      error: 'No API key provided. Please enter your OpenRouter API key starting with sk-or-v1-...',
+      provider,
+      error: provider === 'google' 
+        ? 'No Google Gemini API key provided. Please enter your API key starting with AIza...'
+        : 'No OpenRouter API key provided. Please enter your key starting with sk-or-v1-...',
     });
   }
 
-  const startTime = Date.now();
+  // --- 1. GOOGLE GEMINI OFFICIAL API TEST ---
+  if (provider === 'google') {
+    try {
+      const ai = new GoogleGenAI({ apiKey: keyToUse });
+      const modelToUse = (requestedModel && !requestedModel.includes('/')) ? requestedModel : 'gemini-2.5-flash';
 
+      const response = await ai.models.generateContent({
+        model: modelToUse,
+        contents: 'Say "Google Gemini Connected!" and nothing else.',
+      });
+
+      const latencyMs = Date.now() - startTime;
+      const reply = response.text?.trim() || 'Google Gemini Connected!';
+
+      return res.json({
+        success: true,
+        provider: 'google',
+        message: reply,
+        modelUsed: modelToUse,
+        latencyMs,
+      });
+    } catch (err: any) {
+      console.error('Google Gemini test error:', err);
+      let errorMsg = err.message || 'Failed to communicate with Google Gemini API.';
+      if (errorMsg.includes('API_KEY_INVALID') || errorMsg.includes('400') || errorMsg.includes('401')) {
+        errorMsg = 'Invalid Google API Key. Please verify your key at aistudio.google.com/app/apikey';
+      }
+      return res.status(400).json({
+        success: false,
+        provider: 'google',
+        error: errorMsg,
+      });
+    }
+  }
+
+  // --- 2. OPENROUTER MULTI-MODEL TEST ---
   try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    let modelToUse = requestedModel || 'google/gemini-2.0-flash-exp:free';
+    let response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${keyToUse}`,
         'HTTP-Referer': 'https://nomatic-rss.app',
         'X-Title': 'nomatic RSS',
       },
       body: JSON.stringify({
-        model: model,
+        model: modelToUse,
         messages: [
           { role: 'user', content: 'Say "OpenRouter Connected!" and nothing else.' }
         ],
@@ -248,43 +311,81 @@ app.post('/api/ai/test', async (req, res) => {
       }),
     });
 
-    const latencyMs = Date.now() - startTime;
-
+    // If model suggests a new slug (e.g. meta-llama/llama-3.2-3b-instruct)
     if (!response.ok) {
       const errText = await response.text();
-      const cleanError = extractErrorMessage(response.status, errText);
-      return res.status(response.status).json({
-        success: false,
-        error: cleanError,
-        rawStatus: response.status,
-      });
+      const slugMatch = errText.match(/use this slug instead:\s*([a-zA-Z0-9_\-\.\/:]+)/i);
+      if (slugMatch && slugMatch[1]) {
+        modelToUse = slugMatch[1].trim();
+        // Retry with suggested slug
+        response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${keyToUse}`,
+            'HTTP-Referer': 'https://nomatic-rss.app',
+            'X-Title': 'nomatic RSS',
+          },
+          body: JSON.stringify({
+            model: modelToUse,
+            messages: [
+              { role: 'user', content: 'Say "OpenRouter Connected!" and nothing else.' }
+            ],
+            max_tokens: 20,
+            temperature: 0.1,
+          }),
+        });
+      }
+
+      if (!response.ok) {
+        const cleanError = extractErrorMessage(response.status, errText);
+        return res.status(response.status).json({
+          success: false,
+          provider: 'openrouter',
+          error: cleanError,
+          rawStatus: response.status,
+        });
+      }
     }
 
+    const latencyMs = Date.now() - startTime;
     const data = await response.json();
     const reply = data.choices?.[0]?.message?.content?.trim() || 'Connected!';
 
     return res.json({
       success: true,
+      provider: 'openrouter',
       message: reply,
-      modelUsed: data.model || model,
+      modelUsed: data.model || modelToUse,
       latencyMs,
     });
   } catch (error: any) {
     return res.status(500).json({
       success: false,
+      provider: 'openrouter',
       error: error.message || 'Failed to communicate with OpenRouter API.',
     });
   }
 });
 
-// AI Feed Analysis Endpoint (OpenRouter with free/compatible model support)
+// AI Feed Analysis Endpoint (Google Gemini & OpenRouter Support)
 app.post('/api/ai/analyze', async (req, res) => {
-  const { title, content, customPrompt, mode = 'summary', apiKey, model = 'google/gemini-2.0-flash-exp:free' } = req.body;
+  res.setHeader('Content-Type', 'application/json');
+  const { 
+    title, 
+    content, 
+    customPrompt, 
+    mode = 'summary', 
+    apiKey, 
+    provider: requestedProvider, 
+    model 
+  } = req.body;
 
-  const keyToUse = normalizeKey(apiKey || process.env.OPENROUTER_API_KEY);
+  const keyToUse = normalizeKey(apiKey || (requestedProvider === 'google' ? process.env.GEMINI_API_KEY : (process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY)));
+  const provider = detectProvider(keyToUse, requestedProvider, model);
 
   if (!keyToUse) {
-    // If no key provided, return smart local heuristics structure so user experience is smooth
+    // If no key provided, return smart local heuristics structure
     return res.json({
       success: true,
       mode: 'heuristic',
@@ -300,6 +401,103 @@ app.post('/api/ai/analyze', async (req, res) => {
     });
   }
 
+  // --- GOOGLE GEMINI EXECUTION ---
+  if (provider === 'google') {
+    const ai = new GoogleGenAI({ apiKey: keyToUse });
+    const requestedModel = (model && !model.includes('/')) ? model : 'gemini-2.5-flash';
+    const geminiModelsToTry = requestedModel === 'gemini-2.5-flash'
+      ? ['gemini-2.5-flash', 'gemini-3.1-flash-lite']
+      : [requestedModel, 'gemini-2.5-flash', 'gemini-3.1-flash-lite'];
+
+    let prompt = '';
+    if (mode === 'summary') {
+      prompt = `Analyze this RSS article:\nTitle: "${title}"\nContent: "${content?.slice(0, 4000)}"\n\nReturn a JSON object with this exact format (no extra text outside JSON):\n{\n  "summary": "Crisp 2-sentence executive summary",\n  "keyTakeaways": ["Point 1", "Point 2", "Point 3"],\n  "sentiment": "positive",\n  "keyConcepts": ["Tag1", "Tag2", "Tag3"],\n  "readingLevel": "Intermediate"\n}`;
+    } else if (mode === 'eli5') {
+      prompt = `Explain this RSS article as if I am 10 years old in simple, engaging terms:\nTitle: "${title}"\nContent: "${content?.slice(0, 3000)}"`;
+    } else if (mode === 'podcast') {
+      prompt = `Convert this RSS story into a quick 45-second energetic podcast host dialogue (Alex and Sam):\nTitle: "${title}"\nContent: "${content?.slice(0, 3000)}"`;
+    } else if (mode === 'translate') {
+      const targetLang = req.body.targetLang || 'Spanish';
+      prompt = `Translate this RSS article title and summary into ${targetLang}:\nTitle: "${title}"\nContent: "${content?.slice(0, 2000)}"`;
+    } else {
+      prompt = customPrompt || `Analyze: ${title} - ${content?.slice(0, 1000)}`;
+    }
+
+    let lastGeminiErr: any = null;
+    let successfulGeminiModel = requestedModel;
+    let rawResult = '';
+
+    for (const currentModel of geminiModelsToTry) {
+      try {
+        const response = await ai.models.generateContent({
+          model: currentModel,
+          contents: prompt,
+        });
+
+        rawResult = response.text || '';
+        if (rawResult) {
+          successfulGeminiModel = currentModel;
+          lastGeminiErr = null;
+          break;
+        }
+      } catch (err: any) {
+        lastGeminiErr = err;
+        console.warn(`Gemini model ${currentModel} failed: ${err.message}. Trying next fallback...`);
+      }
+    }
+
+    if (!rawResult && lastGeminiErr) {
+      const msg = lastGeminiErr.message || '';
+      let cleanMsg = 'Google Gemini analysis failed.';
+      if (msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota') || msg.includes('Quota')) {
+        cleanMsg = 'Gemini Quota Exceeded for this model. Switch to "Google Gemini 2.5 Flash" in AI Settings (Free Tier).';
+      } else if (msg.includes('API_KEY_INVALID') || msg.includes('400') || msg.includes('401')) {
+        cleanMsg = 'Invalid Google Gemini API Key. Please verify your key in AI Settings.';
+      } else {
+        cleanMsg = msg;
+      }
+
+      return res.status(lastGeminiErr.status || 400).json({
+        success: false,
+        provider: 'google',
+        error: cleanMsg,
+        suggestedModel: 'gemini-2.5-flash',
+      });
+    }
+
+    let parsedJson = null;
+    if (mode === 'summary') {
+      try {
+        const cleaned = rawResult
+          .replace(/```json\s*/gi, '')
+          .replace(/```\s*/g, '')
+          .trim();
+        parsedJson = JSON.parse(cleaned);
+      } catch (e) {
+        const summaryMatch = rawResult.match(/"summary"\s*:\s*"([^"]+)"/);
+        parsedJson = {
+          summary: summaryMatch ? summaryMatch[1] : rawResult.slice(0, 300),
+          keyTakeaways: [
+            'Generated via Google ' + successfulGeminiModel,
+            'High-signal overview from source article',
+            'Ready for offline reading'
+          ],
+          sentiment: 'analytical',
+          keyConcepts: ['Google Gemini', 'News', 'RSS']
+        };
+      }
+    }
+
+    return res.json({
+      success: true,
+      provider: 'google',
+      modelUsed: successfulGeminiModel,
+      rawText: rawResult,
+      data: parsedJson,
+    });
+  }
+
+  // --- OPENROUTER EXECUTION ---
   try {
     let systemPrompt = 'You are an ultra-concise expert RSS feed intelligence analyst. Provide actionable, high-signal insights. Return only valid JSON when requested.';
     let userPrompt = '';
@@ -317,15 +515,15 @@ app.post('/api/ai/analyze', async (req, res) => {
       userPrompt = customPrompt || `Analyze: ${title} - ${content?.slice(0, 1000)}`;
     }
 
-    // Models to try: requested model, then free fallback models if the requested is a free model
-    const isFreeModel = model.includes(':free');
+    const openRouterModel = model || 'google/gemini-2.0-flash-exp:free';
+    const isFreeModel = openRouterModel.includes(':free');
     const modelsToTry = isFreeModel 
-      ? [model, ...FREE_FALLBACK_MODELS.filter((m) => m !== model)]
-      : [model];
+      ? [openRouterModel, ...FREE_FALLBACK_MODELS.filter((m) => m !== openRouterModel)]
+      : [openRouterModel];
 
     let lastError: any = null;
     let data: any = null;
-    let successfulModel = model;
+    let successfulModel = openRouterModel;
 
     for (const currentModel of modelsToTry) {
       try {
@@ -357,7 +555,6 @@ app.post('/api/ai/analyze', async (req, res) => {
           const cleanErr = extractErrorMessage(response.status, errText);
           lastError = { status: response.status, message: cleanErr };
           
-          // If auth error (401 / 402), don't retry other models as the key itself is invalid/unfunded
           if (response.status === 401 || response.status === 402) {
             break;
           }
@@ -370,13 +567,13 @@ app.post('/api/ai/analyze', async (req, res) => {
     if (!data) {
       return res.status(lastError?.status || 500).json({
         success: false,
+        provider: 'openrouter',
         error: lastError?.message || 'OpenRouter API request failed.',
       });
     }
 
     const rawResult = data.choices?.[0]?.message?.content || '';
 
-    // Try parsing as JSON if summary mode
     let parsedJson = null;
     if (mode === 'summary') {
       try {
@@ -386,7 +583,6 @@ app.post('/api/ai/analyze', async (req, res) => {
           .trim();
         parsedJson = JSON.parse(cleaned);
       } catch (e) {
-        // If JSON parsing fails, extract fields via regex fallback
         const summaryMatch = rawResult.match(/"summary"\s*:\s*"([^"]+)"/);
         parsedJson = {
           summary: summaryMatch ? summaryMatch[1] : rawResult.slice(0, 300),
@@ -403,7 +599,7 @@ app.post('/api/ai/analyze', async (req, res) => {
 
     return res.json({
       success: true,
-      mode: 'openrouter',
+      provider: 'openrouter',
       modelUsed: successfulModel,
       rawText: rawResult,
       data: parsedJson,
@@ -412,13 +608,14 @@ app.post('/api/ai/analyze', async (req, res) => {
     console.error('AI analysis error:', error);
     res.status(500).json({
       success: false,
+      provider: 'openrouter',
       error: error.message || 'AI processing failure'
     });
   }
 });
 
 // Setup Vite middleware in development or static serving in production
-async function startServer() {
+export async function startServer() {
   const isProduction = process.env.NODE_ENV === 'production';
 
   if (!isProduction) {
@@ -436,8 +633,13 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Aura RSS Server running on http://0.0.0.0:${PORT}`);
+    console.log(`🚀 nomatic RSS Server running on http://0.0.0.0:${PORT}`);
   });
 }
 
-startServer();
+// Only auto-listen when running standalone (not in Vercel serverless functions)
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
