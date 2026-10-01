@@ -1,3 +1,5 @@
+import { getApiUrl } from './apiUrl';
+
 export interface ExtractedArticle {
   title?: string;
   author?: string;
@@ -20,7 +22,7 @@ export async function extractArticleContent(articleUrl: string): Promise<Extract
 
   // 1. Try server-side extractor first
   try {
-    const res = await fetch(`/api/article/extract?url=${encodeURIComponent(articleUrl)}`, {
+    const res = await fetch(getApiUrl(`/api/article/extract?url=${encodeURIComponent(articleUrl)}`), {
       headers: {
         'Accept': 'application/json',
       },
@@ -49,7 +51,7 @@ export async function extractArticleContent(articleUrl: string): Promise<Extract
   // 2. Fallback: Fetch raw HTML via /api/rss/fetch proxy or CORS proxy, then parse via DOMParser
   let rawHtml = '';
   try {
-    const proxyRes = await fetch(`/api/rss/fetch?url=${encodeURIComponent(articleUrl)}`);
+    const proxyRes = await fetch(getApiUrl(`/api/rss/fetch?url=${encodeURIComponent(articleUrl)}`));
     if (proxyRes.ok) {
       rawHtml = await proxyRes.text();
     }

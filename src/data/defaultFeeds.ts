@@ -259,6 +259,15 @@ export const PRESET_FEED_CATALOG: Array<{
     color: '#6366f1',
   },
   {
+    id: 'alternativeto-bluesky',
+    title: 'AlternativeTo on Bluesky',
+    url: 'https://bsky.app/profile/alternativeto.net/rss',
+    category: 'software',
+    description: 'Real-time updates, app alternatives & discussions from @alternativeto.net on Bluesky',
+    icon: 'Layers',
+    color: '#0284c7',
+  },
+  {
     id: 'hacker-news',
     title: 'Hacker News Frontpage',
     url: 'https://news.ycombinator.com/rss',

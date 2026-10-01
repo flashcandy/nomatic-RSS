@@ -1,18 +1,36 @@
 import { FeedItem, FeedSource } from '../types';
 import { extractTagsFromText } from '../data/defaultFeeds';
 import { parseArticleDate } from './dateUtils';
+import { getApiUrl } from './apiUrl';
 
 export async function fetchAndParseFeed(
-  feedUrl: string,
+  rawFeedUrl: string,
   categoryId: string = 'software',
-  customTags: string[] = []
+  customTags: string[] = [],
+  existingFeedId?: string
 ): Promise<{ feed: FeedSource; items: FeedItem[] }> {
+  let feedUrl = rawFeedUrl.trim();
+
+  // Normalize Bluesky Profile URLs and Handles to their real-time RSS endpoint
+  if (feedUrl.includes('bsky.app/profile/') && !feedUrl.endsWith('/rss')) {
+    feedUrl = feedUrl.replace(/\/+$/, '') + '/rss';
+  } else if (/^@?[a-zA-Z0-9_\-\.]+\.bsky\.social$/i.test(feedUrl)) {
+    const handle = feedUrl.replace(/^@/, '');
+    feedUrl = `https://bsky.app/profile/${handle}/rss`;
+  }
+
   let xmlText = '';
 
-  // 1. Try our backend proxy first (handles CORS flawlessly)
+  // 1. Try our backend proxy first (handles CORS flawlessly and bypasses browser cache)
   try {
-    const proxyUrl = `/api/rss/fetch?url=${encodeURIComponent(feedUrl)}`;
-    const res = await fetch(proxyUrl);
+    const proxyUrl = getApiUrl(`/api/rss/fetch?url=${encodeURIComponent(feedUrl)}&_t=${Date.now()}`);
+    const res = await fetch(proxyUrl, {
+      cache: 'no-store',
+      headers: {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+      },
+    });
     if (res.ok) {
       xmlText = await res.text();
     }
@@ -23,14 +41,16 @@ export async function fetchAndParseFeed(
   // 2. If proxy failed (e.g. offline or pure client), try direct or AllOrigins public proxy
   if (!xmlText) {
     try {
-      const res = await fetch(feedUrl);
+      const res = await fetch(feedUrl, { cache: 'no-store' });
       if (res.ok) {
         xmlText = await res.text();
       }
     } catch (e) {
       // Try AllOrigins proxy
       try {
-        const fallbackRes = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`);
+        const fallbackRes = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}&_t=${Date.now()}`, {
+          cache: 'no-store'
+        });
         if (fallbackRes.ok) {
           xmlText = await fallbackRes.text();
         }
@@ -44,20 +64,21 @@ export async function fetchAndParseFeed(
     throw new Error('Empty response received from feed.');
   }
 
-  return parseFeedXmlString(xmlText, feedUrl, categoryId, customTags);
+  return parseFeedXmlString(xmlText, feedUrl, categoryId, customTags, existingFeedId);
 }
 
 export function parseFeedXmlString(
   xmlText: string,
   feedUrl: string,
   categoryId: string = 'software',
-  customTags: string[] = []
+  customTags: string[] = [],
+  existingFeedId?: string
 ): { feed: FeedSource; items: FeedItem[] } {
   // Check if it's JSON Feed format
   if (xmlText.trim().startsWith('{')) {
     try {
       const json = JSON.parse(xmlText);
-      return parseJsonFeed(json, feedUrl, categoryId, customTags);
+      return parseJsonFeed(json, feedUrl, categoryId, customTags, existingFeedId);
     } catch (e) {
       // Continue to XML parser
     }
@@ -74,7 +95,7 @@ export function parseFeedXmlString(
 
   // Check if RSS or Atom
   const isAtom = !!xmlDoc.querySelector('feed');
-  const feedId = `feed-${feedUrl.replace(/[^a-zA-Z0-9]/g, '').slice(0, 30)}-${Date.now()}`;
+  const feedId = existingFeedId || `feed-${feedUrl.replace(/[^a-zA-Z0-9]/g, '').slice(0, 40)}`;
 
   if (isAtom) {
     return parseAtomFeed(xmlDoc, feedUrl, feedId, categoryId, customTags);
@@ -316,9 +337,10 @@ function parseJsonFeed(
   json: any,
   feedUrl: string,
   categoryId: string,
-  customTags: string[]
+  customTags: string[],
+  existingFeedId?: string
 ): { feed: FeedSource; items: FeedItem[] } {
-  const feedId = `feed-json-${Date.now()}`;
+  const feedId = existingFeedId || `feed-json-${feedUrl.replace(/[^a-zA-Z0-9]/g, '').slice(0, 30)}`;
   const feed: FeedSource = {
     id: feedId,
     title: json.title || 'JSON Feed',

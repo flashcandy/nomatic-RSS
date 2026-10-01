@@ -19,6 +19,7 @@ import {
   Globe
 } from 'lucide-react';
 import { OpenRouterConfig, AIProvider } from '../types';
+import { getApiUrl } from '../utils/apiUrl';
 
 interface OpenRouterSettingsModalProps {
   config: OpenRouterConfig;
@@ -183,7 +184,7 @@ export const OpenRouterSettingsModal: React.FC<OpenRouterSettingsModalProps> = (
     setTestResult(null);
 
     try {
-      const res = await fetch('/api/ai/test', {
+      const res = await fetch(getApiUrl('/api/ai/test'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

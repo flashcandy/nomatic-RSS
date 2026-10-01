@@ -27,8 +27,11 @@ import {
   FileText,
   CheckCircle2,
   Loader2,
-  Compass
+  Compass,
+  Share2
 } from 'lucide-react';
+import { getApiUrl } from '../utils/apiUrl';
+import { nativeShare, nativeHapticImpact } from '../utils/nativeBridge';
 import { FeedItem, ReaderSettings, FeedTag, OpenRouterConfig } from '../types';
 import { getThemeClasses, getFontFamilyClass, getFontSizeClass, getLineHeightClass } from '../utils/themeStyles';
 import { soundFx } from '../utils/sound';
@@ -174,8 +177,20 @@ export const ArticleDetailModal: React.FC<ArticleDetailModalProps> = ({
     if (item.link) {
       navigator.clipboard.writeText(item.link);
       setCopied(true);
+      nativeHapticImpact('light');
       setTimeout(() => setCopied(false), 2000);
     }
+  };
+
+  const handleNativeShare = async () => {
+    if (!item) return;
+    nativeHapticImpact('medium');
+    await nativeShare({
+      title: item.title,
+      text: item.description?.slice(0, 200),
+      url: item.link,
+      dialogTitle: 'Share Story',
+    });
   };
 
   const runAiAnalysis = async (mode: 'summary' | 'eli5' | 'podcast' | 'translate') => {
@@ -183,7 +198,7 @@ export const ArticleDetailModal: React.FC<ArticleDetailModalProps> = ({
     setAiError(null);
     const contentToAnalyze = extractedArticle?.textContent || item.content || item.description;
     try {
-      const res = await fetch('/api/ai/analyze', {
+      const res = await fetch(getApiUrl('/api/ai/analyze'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -349,6 +364,15 @@ export const ArticleDetailModal: React.FC<ArticleDetailModalProps> = ({
               title="Toggle Bionic Reading (highlight first letters)"
             >
               <Type className="h-4 w-4" />
+            </button>
+
+            {/* Native Share Sheet */}
+            <button
+              onClick={handleNativeShare}
+              className="rounded-xl border border-slate-700 p-1.5 text-slate-400 hover:text-white transition active:scale-95"
+              title="Share via native Android share sheet or Web Share"
+            >
+              <Share2 className="h-4 w-4" />
             </button>
 
             {/* Copy Article Link */}

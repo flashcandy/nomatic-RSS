@@ -26,6 +26,7 @@ import { soundFx } from './utils/sound';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { useSpeechSynthesis } from './hooks/useSpeechSynthesis';
 import { useNotifications } from './hooks/useNotifications';
+import { initNativeFeatures, nativeHapticImpact, isNative, platform } from './utils/nativeBridge';
 
 import { Header } from './components/Header';
 import { Sidebar } from './components/Sidebar';
@@ -147,51 +148,163 @@ export default function App() {
     return () => clearInterval(interval);
   }, [notifSettings.checkIntervalMinutes, feeds]);
 
-  // Refresh All Subscribed Feeds
+  // Refresh All Subscribed Feeds (Live Real-Time Sync)
   const refreshAllFeeds = useCallback(
     async (showFeedback = true) => {
       if (!isOnline) return;
       setIsSyncing(true);
 
       const updatedFeeds = [...feeds];
-      let newItemsFound: FeedItem[] = [];
+      let allFreshItems: FeedItem[] = [];
+      let totalNewItemsCount = 0;
 
       for (let i = 0; i < updatedFeeds.length; i++) {
         const feed = updatedFeeds[i];
         try {
-          const result = await fetchAndParseFeed(feed.url, feed.category, feed.customTags);
+          const result = await fetchAndParseFeed(feed.url, feed.category, feed.customTags, feed.id);
           updatedFeeds[i] = {
             ...feed,
             lastFetched: Date.now(),
             syncStatus: 'success',
             itemCount: result.items.length,
           };
-
-          // Find items that don't already exist
-          const existingGuids = new Set(items.map((it) => it.guid));
-          const trulyNew = result.items.filter((it) => !existingGuids.has(it.guid));
-          if (trulyNew.length > 0) {
-            newItemsFound = [...newItemsFound, ...trulyNew];
-          }
+          allFreshItems = [...allFreshItems, ...result.items];
         } catch (e) {
+          console.warn(`Sync failed for feed ${feed.title || feed.url}:`, e);
           updatedFeeds[i] = { ...feed, syncStatus: 'error' };
         }
       }
 
       setFeeds(updatedFeeds);
 
-      if (newItemsFound.length > 0) {
-        setItems((prev) => [...newItemsFound, ...prev]);
-        notifyNewItems(newItemsFound);
+      if (allFreshItems.length > 0) {
+        setItems((prevItems) => {
+          const itemMap = new Map<string, FeedItem>();
+          const existingKeys = new Set<string>();
+
+          // Index existing items
+          prevItems.forEach((it) => {
+            const key = it.guid || it.link || it.id;
+            itemMap.set(key, it);
+            existingKeys.add(key);
+          });
+
+          const trulyNewItems: FeedItem[] = [];
+
+          // Merge live fetched items
+          allFreshItems.forEach((fresh) => {
+            const key = fresh.guid || fresh.link || fresh.id;
+            const existing = itemMap.get(key);
+
+            if (existing) {
+              // Retain user state, update live article data
+              itemMap.set(key, {
+                ...fresh,
+                id: existing.id,
+                isFavorite: existing.isFavorite,
+                isReadLater: existing.isReadLater,
+                isRead: existing.isRead,
+                readAt: existing.readAt,
+                aiSummary: existing.aiSummary || fresh.aiSummary,
+                aiKeyTakeaways: existing.aiKeyTakeaways || fresh.aiKeyTakeaways,
+                aiSentiment: existing.aiSentiment || fresh.aiSentiment,
+                aiPodcastScript: existing.aiPodcastScript || fresh.aiPodcastScript,
+                tags: Array.from(new Set([...fresh.tags, ...existing.tags])),
+              });
+            } else {
+              itemMap.set(key, fresh);
+              trulyNewItems.push(fresh);
+            }
+          });
+
+          totalNewItemsCount = trulyNewItems.length;
+
+          if (trulyNewItems.length > 0) {
+            notifyNewItems(trulyNewItems);
+          }
+
+          // Sort descending by timestamp
+          return Array.from(itemMap.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        });
       }
 
       setIsSyncing(false);
-      if (showFeedback && newItemsFound.length === 0) {
+      if (showFeedback) {
         soundFx.playPop();
+        nativeHapticImpact('medium');
       }
     },
-    [feeds, isOnline, items, notifyNewItems]
+    [feeds, isOnline, notifyNewItems]
   );
+
+  // Initialize Native Android & Capacitor Capabilities (Back button, status bar, resume sync)
+  useEffect(() => {
+    initNativeFeatures({
+      onBackButton: () => {
+        if (activeArticle) {
+          setActiveArticle(null);
+          return true;
+        }
+        if (speedReaderItem) {
+          setSpeedReaderItem(null);
+          return true;
+        }
+        if (showAddFeedModal) {
+          setShowAddFeedModal(false);
+          return true;
+        }
+        if (showOpenRouterModal) {
+          setShowOpenRouterModal(false);
+          return true;
+        }
+        if (showThemeModal) {
+          setShowThemeModal(false);
+          return true;
+        }
+        if (showNotifModal) {
+          setShowNotifModal(false);
+          return true;
+        }
+        if (showCategoryModal) {
+          setShowCategoryModal(false);
+          return true;
+        }
+        if (showTagModal) {
+          setShowTagModal(false);
+          return true;
+        }
+        if (sidebarOpen) {
+          setSidebarOpen(false);
+          return true;
+        }
+        if (selectedFeedId || selectedCategory || selectedTag) {
+          setSelectedFeedId(null);
+          setSelectedCategory(null);
+          setSelectedTag(null);
+          setSelectedFilter('all');
+          return true;
+        }
+        return false;
+      },
+      onAppResume: () => {
+        refreshAllFeeds(false);
+      },
+    });
+  }, [
+    activeArticle,
+    speedReaderItem,
+    showAddFeedModal,
+    showOpenRouterModal,
+    showThemeModal,
+    showNotifModal,
+    showCategoryModal,
+    showTagModal,
+    sidebarOpen,
+    selectedFeedId,
+    selectedCategory,
+    selectedTag,
+    refreshAllFeeds,
+  ]);
 
   // Filter and Search Articles
   const filteredItems = useMemo(() => {
@@ -256,6 +369,7 @@ export default function App() {
 
   // Actions
   const handleOpenArticle = (item: FeedItem) => {
+    nativeHapticImpact('light');
     setActiveArticle(item);
     // Mark as read and record readAt timestamp
     setItems((prev) =>
@@ -268,11 +382,13 @@ export default function App() {
     if (window.confirm(`Clear Reading History?\n\nThis will reset ${historyCount} previously read articles back to unread status.`)) {
       setItems((prev) => prev.map((it) => (it.isRead ? { ...it, isRead: false, readAt: undefined } : it)));
       soundFx.playPop();
+      nativeHapticImpact('medium');
     }
   };
 
   const handleToggleFavorite = (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    nativeHapticImpact('light');
     setItems((prev) =>
       prev.map((it) => {
         if (it.id === id) {
@@ -294,6 +410,7 @@ export default function App() {
 
   const handleToggleReadLater = (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    nativeHapticImpact('light');
     setItems((prev) =>
       prev.map((it) => (it.id === id ? { ...it, isReadLater: !it.isReadLater } : it))
     );
@@ -301,6 +418,7 @@ export default function App() {
 
   const handleToggleRead = (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    nativeHapticImpact('light');
     setItems((prev) =>
       prev.map((it) => (it.id === id ? { ...it, isRead: !it.isRead, readAt: !it.isRead ? Date.now() : undefined } : it))
     );
@@ -323,10 +441,11 @@ export default function App() {
   };
 
   const handleAddFeed = async (feedUrl: string, categoryId: string, customTags: string[]) => {
-    const result = await fetchAndParseFeed(feedUrl, categoryId, customTags);
-    
-    // Check if feed already exists
     const existingIdx = feeds.findIndex((f) => f.url === feedUrl);
+    const existingFeedId = existingIdx >= 0 ? feeds[existingIdx].id : undefined;
+
+    const result = await fetchAndParseFeed(feedUrl, categoryId, customTags, existingFeedId);
+    
     if (existingIdx >= 0) {
       setFeeds((prev) => {
         const next = [...prev];
@@ -337,10 +456,32 @@ export default function App() {
       setFeeds((prev) => [result.feed, ...prev]);
     }
 
-    // Merge new items avoiding duplicate guids
-    const existingGuids = new Set(items.map((it) => it.guid));
-    const newItems = result.items.filter((it) => !existingGuids.has(it.guid));
-    setItems((prev) => [...newItems, ...prev]);
+    // Merge new items avoiding duplicates and sort descending by publication date
+    setItems((prevItems) => {
+      const itemMap = new Map<string, FeedItem>();
+      prevItems.forEach((it) => itemMap.set(it.guid || it.link || it.id, it));
+
+      result.items.forEach((it) => {
+        const key = it.guid || it.link || it.id;
+        const existing = itemMap.get(key);
+        if (existing) {
+          itemMap.set(key, {
+            ...it,
+            id: existing.id,
+            isFavorite: existing.isFavorite,
+            isRead: existing.isRead,
+            isReadLater: existing.isReadLater,
+            readAt: existing.readAt,
+            aiSummary: existing.aiSummary || it.aiSummary,
+            aiKeyTakeaways: existing.aiKeyTakeaways || it.aiKeyTakeaways,
+          });
+        } else {
+          itemMap.set(key, it);
+        }
+      });
+
+      return Array.from(itemMap.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    });
 
     confetti({
       particleCount: 40,

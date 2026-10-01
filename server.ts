@@ -15,34 +15,235 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '10mb' }));
 
-// RSS Fetch & Proxy Route to bypass CORS seamlessly
+function escapeXml(unsafe: any): string {
+  return String(unsafe || '').replace(/[<>&'"]/g, (c) => {
+    switch (c) {
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '&': return '&amp;';
+      case '"': return '&quot;';
+      case "'": return '&apos;';
+      default: return c;
+    }
+  });
+}
+
+// Generates valid, real-time RSS 2.0 XML directly from Bluesky's official AT-Protocol public API
+async function fetchBlueskyAuthorFeedAsRss(actorRaw: string): Promise<string> {
+  const actor = actorRaw.replace(/^@/, '').trim();
+  
+  let displayName = actor;
+  let description = 'Real-time updates from Bluesky';
+  let avatar = '';
+  let handle = actor;
+
+  try {
+    const profRes = await fetch(`https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=${encodeURIComponent(actor)}`, {
+      headers: { 'User-Agent': 'nomatic-rss/2.0' }
+    });
+    if (profRes.ok) {
+      const prof = await profRes.json();
+      displayName = prof.displayName || prof.handle || actor;
+      handle = prof.handle || actor;
+      description = prof.description || description;
+      avatar = prof.avatar || '';
+    }
+  } catch (e) {
+    console.warn('Could not fetch actor profile:', e);
+  }
+
+  const feedRes = await fetch(`https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(actor)}&limit=50`, {
+    headers: { 'User-Agent': 'nomatic-rss/2.0' }
+  });
+
+  if (!feedRes.ok) {
+    throw new Error(`Bluesky API returned status ${feedRes.status}`);
+  }
+
+  const feedData = await feedRes.json();
+  const items = feedData.feed || [];
+
+  const itemsXml = items.map((item: any, idx: number) => {
+    const post = item.post;
+    if (!post) return '';
+
+    const text = post.record?.text || '';
+    const firstLine = text.split('\n')[0]?.trim() || `Update from ${displayName}`;
+    const title = firstLine.length > 90 ? firstLine.slice(0, 87) + '...' : firstLine;
+
+    // Extract link from facets or fallback to Bluesky post link
+    let articleLink = '';
+    if (post.record?.facets) {
+      for (const facet of post.record.facets) {
+        if (facet.features) {
+          for (const feat of facet.features) {
+            if (feat.uri) {
+              articleLink = feat.uri;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    const postRkey = post.uri ? post.uri.split('/').pop() : `post-${idx}`;
+    const bskyPostUrl = `https://bsky.app/profile/${post.author?.handle || handle}/post/${postRkey}`;
+    const itemLink = articleLink || bskyPostUrl;
+    const pubDate = post.record?.createdAt ? new Date(post.record.createdAt).toUTCString() : new Date().toUTCString();
+    const guid = post.uri || bskyPostUrl;
+
+    // Embedded images
+    let enclosureTag = '';
+    let mediaThumbTag = '';
+    let imageInDesc = '';
+
+    const images = post.embed?.images || post.record?.embed?.images || [];
+    if (Array.isArray(images) && images.length > 0) {
+      const firstImg = images[0];
+      const imgUrl = firstImg.fullsize || firstImg.thumb || (firstImg.image ? `https://cdn.bsky.app/img/feed_thumbnail/plain/${post.author?.did}/${firstImg.image.ref?.$link}` : '');
+      if (imgUrl) {
+        enclosureTag = `<enclosure url="${escapeXml(imgUrl)}" type="image/jpeg" length="0" />`;
+        mediaThumbTag = `<media:thumbnail url="${escapeXml(imgUrl)}" />`;
+        imageInDesc = `<p><img src="${escapeXml(imgUrl)}" alt="${escapeXml(firstImg.alt || '')}" style="max-width:100%;border-radius:8px;" /></p>`;
+      }
+    }
+
+    const formattedDesc = `<p>${escapeXml(text).replace(/\n/g, '<br/>')}</p>${imageInDesc}${articleLink ? `<p><a href="${escapeXml(articleLink)}">Read Full Article &raquo;</a></p>` : ''}<p><a href="${escapeXml(bskyPostUrl)}">View on Bluesky &raquo;</a></p>`;
+
+    return `
+    <item>
+      <title><![CDATA[${title}]]></title>
+      <link>${escapeXml(itemLink)}</link>
+      <guid isPermaLink="false">${escapeXml(guid)}</guid>
+      <pubDate>${pubDate}</pubDate>
+      <description><![CDATA[${formattedDesc}]]></description>
+      ${enclosureTag}
+      ${mediaThumbTag}
+      <dc:creator><![CDATA[${post.author?.displayName || post.author?.handle || displayName}]]></dc:creator>
+    </item>`;
+  }).filter(Boolean).join('\n');
+
+  const channelTitle = `${displayName} (@${handle}) on Bluesky`;
+  const channelLink = `https://bsky.app/profile/${handle}`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:media="http://search.yahoo.com/mrss/" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title><![CDATA[${channelTitle}]]></title>
+    <link>${escapeXml(channelLink)}</link>
+    <description><![CDATA[${description}]]></description>
+    <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
+    <generator>nomatic-rss Realtime Engine</generator>
+    ${avatar ? `<image><url>${escapeXml(avatar)}</url><title><![CDATA[${channelTitle}]]></title><link>${escapeXml(channelLink)}</link></image>` : ''}
+    ${itemsXml}
+  </channel>
+</rss>`;
+}
+
+// RSS Fetch & Proxy Route to bypass CORS seamlessly with Realtime Freshness & Fallbacks
 app.get('/api/rss/fetch', async (req, res) => {
-  const feedUrl = req.query.url as string;
+  let feedUrl = req.query.url as string;
   if (!feedUrl) {
     return res.status(400).json({ error: 'Missing feed url parameter' });
   }
 
+  // Set strict non-caching headers so client always gets the real-time latest feed
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0',
+    'Pragma': 'no-cache',
+    'Expires': '0',
+    'Surrogate-Control': 'no-store'
+  });
+
+  // 1. Direct Bluesky profile check (handles https://bsky.app/profile/<actor>, /rss, @handle.bsky.social)
+  const isBluesky = feedUrl.includes('bsky.app/profile/') || /@?[a-zA-Z0-9_\-\.]+\.bsky\.social/i.test(feedUrl);
+  if (isBluesky) {
+    const actorMatch = feedUrl.match(/bsky\.app\/profile\/([^/?#]+)/i) || feedUrl.match(/@?([a-zA-Z0-9_\-\.]+\.bsky\.social)/i);
+    const actor = actorMatch ? actorMatch[1] : 'alternativeto.net';
+    try {
+      const xml = await fetchBlueskyAuthorFeedAsRss(actor);
+      res.set('Content-Type', 'application/xml; charset=utf-8');
+      return res.send(xml);
+    } catch (bskyErr: any) {
+      console.warn(`Bluesky API bridge error for ${actor}:`, bskyErr);
+    }
+  }
+
+  // 2. Fetch feed from upstream
   try {
-    const response = await fetch(feedUrl, {
+    let response = await fetch(feedUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 AuraRSS/2.0',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 nomatic-rss/2.0',
         'Accept': 'application/rss+xml, application/atom+xml, application/xml, text/xml, application/json, */*',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
       },
     });
 
-    if (!response.ok) {
-      return res.status(response.status).json({
+    let xmlText = '';
+    let isCloudflare = false;
+
+    if (!response.ok && (response.status === 403 || response.status === 503 || response.status === 429)) {
+      isCloudflare = true;
+    } else {
+      xmlText = await response.text();
+      if (xmlText.includes('Just a moment...') || xmlText.includes('challenge-platform') || xmlText.includes('cf-browser-verification')) {
+        isCloudflare = true;
+      }
+    }
+
+    // 3. Graceful fallback for AlternativeTo when blocked by Cloudflare anti-bot
+    if (isCloudflare && (feedUrl.includes('alternativeto.net') || feedUrl.includes('alternative'))) {
+      try {
+        const liveXml = await fetchBlueskyAuthorFeedAsRss('alternativeto.net');
+        res.set('Content-Type', 'application/xml; charset=utf-8');
+        return res.send(liveXml);
+      } catch (altErr) {
+        console.warn('AlternativeTo live stream fallback error:', altErr);
+      }
+    }
+
+    // 4. Try AllOrigins proxy for other Cloudflare-blocked feeds
+    if (isCloudflare) {
+      try {
+        const proxyResp = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}&_t=${Date.now()}`, {
+          headers: { 'Cache-Control': 'no-cache' }
+        });
+        if (proxyResp.ok) {
+          const proxiedText = await proxyResp.text();
+          if (!proxiedText.includes('Just a moment...')) {
+            xmlText = proxiedText;
+            isCloudflare = false;
+          }
+        }
+      } catch (proxyErr) {}
+    }
+
+    if (isCloudflare || !response.ok) {
+      // If still blocked and belongs to AlternativeTo, guarantee feed with live bridge
+      if (feedUrl.includes('alternativeto.net')) {
+        const liveXml = await fetchBlueskyAuthorFeedAsRss('alternativeto.net');
+        res.set('Content-Type', 'application/xml; charset=utf-8');
+        return res.send(liveXml);
+      }
+
+      return res.status(response.status || 502).json({
         error: `Failed to fetch feed: ${response.status} ${response.statusText}`,
       });
     }
 
-    const xmlText = await response.text();
     const contentType = response.headers.get('content-type') || 'application/xml';
-
     res.set('Content-Type', contentType);
     res.send(xmlText);
   } catch (error: any) {
     console.error('Error fetching RSS feed:', error);
+    if (feedUrl.includes('alternativeto.net')) {
+      try {
+        const liveXml = await fetchBlueskyAuthorFeedAsRss('alternativeto.net');
+        res.set('Content-Type', 'application/xml; charset=utf-8');
+        return res.send(liveXml);
+      } catch (e) {}
+    }
     res.status(500).json({ error: error.message || 'Internal proxy error' });
   }
 });

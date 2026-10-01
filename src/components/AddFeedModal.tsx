@@ -136,14 +136,17 @@ export const AddFeedModal: React.FC<AddFeedModalProps> = ({
             <div className="relative">
               <Globe className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
               <input
-                type="url"
+                type="text"
                 required
                 value={feedUrl}
                 onChange={(e) => setFeedUrl(e.target.value)}
-                placeholder="https://example.com/feed.xml"
-                className="w-full rounded-xl border border-slate-700 bg-slate-800/80 py-2.5 pl-10 pr-4 text-xs sm:text-sm text-white placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="https://bsky.app/profile/alternativeto.net or RSS URL"
+                className="w-full rounded-xl border border-slate-700 bg-slate-800/80 py-2.5 pl-10 pr-4 text-xs sm:text-sm text-white placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
               />
             </div>
+            <p className="text-[11px] text-slate-400 mt-1">
+              💡 Supports standard RSS/Atom XML, JSON feeds, and direct Bluesky profile URLs (e.g. <span className="text-sky-400 font-mono">https://bsky.app/profile/alternativeto.net</span>).
+            </p>
           </div>
 
           {/* Category Selector */}

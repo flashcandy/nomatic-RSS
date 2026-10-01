@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Full-bleed background for maskable icon -->
+    <linearGradient id="maskableBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff2e93" />
+      <stop offset="40%" stop-color="#ff007a" />
+      <stop offset="70%" stop-color="#7928ca" />
+      <stop offset="100%" stop-color="#4338ca" />
+    </linearGradient>
+
+    <!-- Glass Overlay Gradient -->
+    <linearGradient id="glassGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.25" />
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="0.0" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.3" />
+    </linearGradient>
+
+    <linearGradient id="heartGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#ffe4f0" />
+    </linearGradient>
+
+    <linearGradient id="arcGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="60%" stop-color="#ffd1eb" />
+      <stop offset="100%" stop-color="#ffffff" />
+    </linearGradient>
+
+    <filter id="iconGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#ff007a" flood-opacity="0.5" />
+    </filter>
+  </defs>
+
+  <!-- Full-bleed solid gradient background (no rounded corners for maskable) -->
+  <rect width="512" height="512" fill="url(#maskableBg)" />
+  <rect width="512" height="256" fill="url(#glassGrad)" />
+
+  <!-- Centered Safe-Zone (scaled down to 80% with 10% padding) -->
+  <g transform="translate(51, 51) scale(0.80)" filter="url(#iconGlow)">
+    <!-- Lovable Heart Center Node -->
+    <path d="M 172 320 
+             C 172 290, 138 274, 116 296 
+             C 94 274, 60 290, 60 320 
+             C 60 354, 116 388, 116 388 
+             C 116 388, 172 354, 172 320 Z" 
+          transform="scale(1.18) translate(-10, -50)"
+          fill="url(#heartGrad)" />
+
+    <!-- Innermost RSS Signal Arc -->
+    <path d="M 126 232 A 120 120 0 0 1 246 352" 
+          fill="none" 
+          stroke="url(#arcGrad)" 
+          stroke-width="36" 
+          stroke-linecap="round" />
+
+    <!-- Outermost RSS Signal Arc -->
+    <path d="M 126 136 A 216 216 0 0 1 342 352" 
+          fill="none" 
+          stroke="url(#arcGrad)" 
+          stroke-width="36" 
+          stroke-linecap="round" />
+
+    <!-- Cute Lovable Mini Heart floating above the signal -->
+    <path d="M 374 130 
+             C 374 110, 350 98, 334 114 
+             C 318 98, 294 110, 294 130 
+             C 294 154, 334 178, 334 178 
+             C 334 178, 374 154, 374 130 Z" 
+          transform="scale(0.85) translate(40, -10)"
+          fill="#ffffff" 
+          opacity="0.95" />
+
+    <!-- Radiant Sparkle Stars -->
+    <path d="M 396 76 Q 396 112 432 112 Q 396 112 396 148 Q 396 112 360 112 Q 396 112 396 76 Z" 
+          fill="#ffffff" 
+          opacity="0.95" />
+
+    <path d="M 390 280 Q 390 296 406 296 Q 390 296 390 312 Q 390 296 374 296 Q 390 296 390 280 Z" 
+          fill="#ffd1eb" 
+          opacity="0.85" />
+  </g>
+</svg>
